@@ -72,6 +72,8 @@
 #endif
 #if defined(Q_OS_ANDROID)
 #include <QtCore/private/qandroidextras_p.h>
+
+#include "controllers/android.h"
 #endif
 
 #if defined(Q_OS_LINUX) && QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
@@ -719,6 +721,22 @@ void CoreServices::initialize(QApplication* pApp) {
     // (long)
     qDebug() << "Creating ControllerManager";
     m_pControllerManager = std::make_shared<ControllerManager>(pConfig);
+#if defined(Q_OS_ANDROID)
+    mixxx::android::setUsbHotplugHandler([this]() {
+        if (!m_pControllerManager) {
+            return;
+        }
+        QMetaObject::invokeMethod(m_pControllerManager.get(),
+                &ControllerManager::slotHotplugRefresh,
+                Qt::QueuedConnection);
+    });
+    mixxx::android::setZ1AudioHandler([this]() {
+        if (!m_pSoundManager) {
+            return;
+        }
+        m_pSoundManager->adoptOriginalKontrolZ1IfPresent();
+    });
+#endif
 
     // Scan the library for new files and directories
     bool rescan = m_cmdlineArgs.getRescanLibrary() ||

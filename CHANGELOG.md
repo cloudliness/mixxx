@@ -2,6 +2,12 @@
 
 ## [2.7.0](https://github.com/mixxxdj/mixxx/milestone/47) (Unreleased)
 
+### Controllers
+
+* Add a HID mapping for the Native Instruments Traktor Kontrol X1 Mk2 (USB 17cc:1220)
+* Android: enumerate HID controllers without USB permission, request permission with a mutable PendingIntent, and open a matching shipped mapping when a device is plugged in
+* Android: route the original Traktor Kontrol Z1 (USB 17cc:1210, not the Mk2) main mix to outputs 1-2 and headphones to outputs 3-4 when the USB audio device reports 4 channels
+
 ## [2.6.0](https://github.com/mixxxdj/mixxx/milestone/44) (Unreleased)
 
 ### STEM file support

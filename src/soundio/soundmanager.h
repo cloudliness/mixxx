@@ -67,6 +67,9 @@ class SoundManager : public QObject {
     QList<QString> getHostAPIList() const;
     SoundManagerConfig getConfig() const;
     SoundDeviceStatus setConfig(const SoundManagerConfig& config);
+    /// Re-read Android USB audio devices and, when the original Kontrol Z1
+    /// exposes 4 channels, route main to 1-2 and headphones to 3-4.
+    void adoptOriginalKontrolZ1IfPresent();
     // Due to a bug in in PulseAudio, we must give at least 5 seconds of cool
     // down before performing further audio related operation. This sleep
     // happens during the function call by default (synchronous blocking), but

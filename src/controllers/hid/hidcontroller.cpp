@@ -103,6 +103,11 @@ int HidController::open(const QString& resourcePath) {
         return -1;
     }
 
+    const auto failOpen = [this]() {
+        m_reportDescriptorLock.reset();
+        return -1;
+    };
+
     // Acquire a persistent lock protecting m_reportDescriptor and
     // m_deviceUsesReportIds. The lock is intentionally kept for the entire time
     // the device is considered "open":
@@ -119,7 +124,7 @@ int HidController::open(const QString& resourcePath) {
 
     VERIFY_OR_DEBUG_ASSERT(!m_pHidIoThread) {
         qWarning() << "HidIoThread already present for" << getName();
-        return -1;
+        return failOpen();
     }
 
 #ifdef __ANDROID__
@@ -136,7 +141,7 @@ int HidController::open(const QString& resourcePath) {
             USB_SERVICE.object());
     if (!usbManager.isValid()) {
         qDebug() << "usbManager invalid";
-        return -1;
+        return failOpen();
     }
 
     auto usbDevice = m_deviceInfo.androidUsbDevice();
@@ -153,7 +158,7 @@ int HidController::open(const QString& resourcePath) {
         // Wait for permission
         if (!mixxx::android::waitForPermission(usbDevice)) {
             qDebug() << "access to device wasn't granted";
-            return -1;
+            return failOpen();
         }
         m_deviceInfo.updateSerialNumber(
                 usbDevice.callMethod<jstring>("getSerialNumber").toString());
@@ -165,7 +170,14 @@ int HidController::open(const QString& resourcePath) {
 
     if (!usbDeviceConnection.isValid()) {
         qDebug() << "Unable to open HID device";
-        return -1;
+        return failOpen();
+    }
+
+    const auto interfaceNumber = m_deviceInfo.getUsbInterfaceNumber();
+    if (!interfaceNumber.has_value()) {
+        qWarning() << "HID device" << getName() << "has no USB interface number";
+        usbDeviceConnection.callMethod<void>("close");
+        return failOpen();
     }
 
     auto fileDescriptor = static_cast<intptr_t>(
@@ -175,11 +187,16 @@ int HidController::open(const QString& resourcePath) {
     qCInfo(m_logBase) << "Opening HID device" << getName()
                       << "by file descriptor"
                       << fileDescriptor << "and interface"
-                      << m_deviceInfo.getUsbInterfaceNumber();
+                      << interfaceNumber.value();
 
     libusb_set_option(nullptr, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
     hid_device* pHidDevice = hid_libusb_wrap_sys_device(
-            fileDescriptor, m_deviceInfo.getUsbInterfaceNumber().value());
+            fileDescriptor, interfaceNumber.value());
+    if (!pHidDevice) {
+        qWarning() << "hid_libusb_wrap_sys_device failed for" << getName();
+        usbDeviceConnection.callMethod<void>("close");
+        return failOpen();
+    }
 #else
     // Open device by path
     qCInfo(m_logBase) << "Opening HID device" << getName() << "by HID path"
@@ -245,7 +262,7 @@ int HidController::open(const QString& resourcePath) {
                                                 mixxx::convertWCStringToQString(
                                                         hid_error(nullptr),
                                                         kMaxHidErrorMessageSize));
-        return -1;
+        return failOpen();
     }
 #endif
 
@@ -253,7 +270,7 @@ int HidController::open(const QString& resourcePath) {
     if (hid_set_nonblocking(pHidDevice, 1) != 0) {
         qCWarning(m_logBase) << "Unable to set HID device " << getName() << " to non-blocking";
         hid_close(pHidDevice);
-        return -1;
+        return failOpen();
     }
 
 #ifndef Q_OS_ANDROID
@@ -310,6 +327,13 @@ int HidController::open(const QString& resourcePath) {
 
     applyMapping(resourcePath);
     setOpen(true);
+#ifdef __ANDROID__
+    // Original Kontrol Z1 (not the Mk2). HID permission is what makes the
+    // class-compliant 4-channel USB audio device visible to the audio HAL.
+    if (m_deviceInfo.getVendorId() == 0x17cc && m_deviceInfo.getProductId() == 0x1210) {
+        mixxx::android::notifyZ1AudioReady();
+    }
+#endif
     return 0;
 }
 

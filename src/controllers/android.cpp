@@ -4,8 +4,26 @@
 #include <android/log.h>
 #include <qjnitypes.h>
 
+#include <QCoreApplication>
+#include <QThread>
 #include <QtJniTypes>
 #include <cstddef>
+
+namespace {
+std::function<void()> s_hotplugHandler;
+bool s_pendingHotplug = false;
+std::function<void()> s_z1AudioHandler;
+bool s_pendingZ1Audio = false;
+
+void dispatchOnGuiThread(const std::function<void()>& function) {
+    QCoreApplication* app = QCoreApplication::instance();
+    if (app && QThread::currentThread() != app->thread()) {
+        QMetaObject::invokeMethod(app, function, Qt::QueuedConnection);
+        return;
+    }
+    function();
+}
+} // namespace
 
 namespace mixxx {
 namespace android {
@@ -14,6 +32,54 @@ std::condition_variable s_grantingWaitCond = {};
 std::vector<std::pair<QJniObject, bool>> s_grantingResult = {};
 QJniObject s_intent = {};
 QJniObject s_usbManager = {};
+
+void setUsbHotplugHandler(std::function<void()> handler) {
+    std::unique_lock lock(s_androidLock);
+    s_hotplugHandler = std::move(handler);
+    const bool pending = s_pendingHotplug;
+    s_pendingHotplug = false;
+    lock.unlock();
+    if (pending && s_hotplugHandler) {
+        dispatchOnGuiThread(s_hotplugHandler);
+    }
+}
+
+void notifyUsbDevicesChanged() {
+    std::function<void()> handler;
+    {
+        std::unique_lock lock(s_androidLock);
+        if (!s_hotplugHandler) {
+            s_pendingHotplug = true;
+            return;
+        }
+        handler = s_hotplugHandler;
+    }
+    dispatchOnGuiThread(handler);
+}
+
+void setZ1AudioHandler(std::function<void()> handler) {
+    std::unique_lock lock(s_androidLock);
+    s_z1AudioHandler = std::move(handler);
+    const bool pending = s_pendingZ1Audio;
+    s_pendingZ1Audio = false;
+    lock.unlock();
+    if (pending && s_z1AudioHandler) {
+        dispatchOnGuiThread(s_z1AudioHandler);
+    }
+}
+
+void notifyZ1AudioReady() {
+    std::function<void()> handler;
+    {
+        std::unique_lock lock(s_androidLock);
+        if (!s_z1AudioHandler) {
+            s_pendingZ1Audio = true;
+            return;
+        }
+        handler = s_z1AudioHandler;
+    }
+    dispatchOnGuiThread(handler);
+}
 
 const QJniObject& getIntent() {
     __android_log_print(ANDROID_LOG_VERBOSE, "mixxx", "about to get intent");
@@ -30,16 +96,29 @@ const QJniObject& getIntent() {
 
     QJniObject context = QNativeInterface::QAndroidApplication::context();
 
-    s_usbManager = QJniObject("org/mixxx/UsbPermission");
-    jint FLAG_IMMUTABLE =
-            QJniObject::getStaticField<jint>(
-                    "android/app/PendingIntent",
-                    "FLAG_IMMUTABLE");
+    s_usbManager = QJniObject::callStaticObjectMethod(
+            "org/mixxx/UsbPermission",
+            "getInstance",
+            "()Lorg/mixxx/UsbPermission;");
+    // USB permission results are written into the PendingIntent extras.
+    // FLAG_IMMUTABLE on API 31+ makes that fail silently, so the dialog never
+    // completes. FLAG_MUTABLE exists only from API 31.
+    const jint apiLevel = QJniObject::getStaticField<jint>(
+            "android/os/Build$VERSION", "SDK_INT");
+    jint pendingIntentFlags = 0;
+    if (apiLevel >= 31) {
+        pendingIntentFlags = QJniObject::getStaticField<jint>(
+                "android/app/PendingIntent", "FLAG_MUTABLE");
+    }
     QtJniTypes::String ACTION_USB_PERMISSION =
             QJniObject::fromString("org.mixxx.permissions.USB_PERMISSION");
-    QtJniTypes::Intent intent = QJniObject("android/content/Intent",
+    QJniObject intent("android/content/Intent",
             "(Ljava/lang/String;)V",
             ACTION_USB_PERMISSION.object<jstring>());
+    const QJniObject packageName = context.callMethod<jstring>("getPackageName");
+    intent.callObjectMethod("setPackage",
+            "(Ljava/lang/String;)Landroid/content/Intent;",
+            packageName.object<jstring>());
     if (!intent.isValid()) {
         __android_log_print(ANDROID_LOG_WARN, "mixxx", "pending intent is invalid!");
     }
@@ -50,8 +129,8 @@ const QJniObject& getIntent() {
                     "Intent;I)Landroid/app/PendingIntent;",
                     context,
                     0,
-                    intent,
-                    FLAG_IMMUTABLE);
+                    intent.object(),
+                    pendingIntentFlags);
 
     if (!s_intent.isValid()) {
         __android_log_print(ANDROID_LOG_WARN, "mixxx", "pending intent is invalid!");
@@ -91,7 +170,11 @@ bool waitForPermission(const QJniObject& device) {
                 "mixxx",
                 "Not found - current result count: %lu",
                 s_grantingResult.size());
+        // Drop the lock before pumping events. The permission broadcast is
+        // delivered on the GUI thread and needs s_androidLock to record the result.
+        lock.unlock();
         QCoreApplication::processEvents();
+        lock.lock();
         retries++;
         if (retries >= 10) {
             __android_log_print(ANDROID_LOG_WARN, "mixxx", "wait for perm timeout");
@@ -120,10 +203,16 @@ void usbDeviceAccessResult(JNIEnv*, jobject, jobject device, jboolean granted) {
 }
 Q_DECLARE_JNI_NATIVE_METHOD(usbDeviceAccessResult)
 
+void usbDevicesChanged(JNIEnv*, jobject) {
+    mixxx::android::notifyUsbDevicesChanged();
+}
+Q_DECLARE_JNI_NATIVE_METHOD(usbDevicesChanged)
+
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM*, void*) {
     QJniEnvironment env;
     env.registerNativeMethods<QtJniTypes::UsbPermissionClass>({
             Q_JNI_NATIVE_METHOD(usbDeviceAccessResult),
+            Q_JNI_NATIVE_METHOD(usbDevicesChanged),
     });
     return JNI_VERSION_1_6;
 }

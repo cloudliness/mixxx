@@ -674,6 +674,23 @@ void QmlControllerManagerProxy::refreshMappings() {
 }
 void QmlControllerManagerProxy::refreshKnownDevices() {
     const auto controllers = m_pControllerManager->getControllers();
+    QList<Controller*> keptControllers;
+    for (auto* pController : std::as_const(m_knownControllers)) {
+        if (controllers.contains(pController)) {
+            keptControllers.append(pController);
+        }
+    }
+    m_knownControllers = keptControllers;
+    const auto dropMissing = [&controllers](QList<QmlControllerDeviceProxy*>& proxies) {
+        for (int i = proxies.size() - 1; i >= 0; --i) {
+            if (!controllers.contains(proxies.at(i)->internal())) {
+                proxies.at(i)->deleteLater();
+                proxies.removeAt(i);
+            }
+        }
+    };
+    dropMissing(m_knownDevicesFound);
+    dropMissing(m_unknownDevicesFound);
     for (auto* pController : std::as_const(controllers)) {
         if (m_knownControllers.contains(pController)) {
             continue;

@@ -8,6 +8,7 @@
 #include <libusb.h>
 
 #include <QJniObject>
+#include <QSet>
 #else
 #include <hidapi.h>
 #endif
@@ -153,6 +154,8 @@ QList<Controller*> HidEnumerator::queryDevices() {
             "found %d USB devices for HID enumerator",
             deviceList.size());
 
+    QList<Controller*> found;
+    QSet<QString> seenKeys;
     for (const auto& usbDevice : deviceList) {
         for (jint ifaceIdx = 0;
                 ifaceIdx < usbDevice->callMethod<jint>("getInterfaceCount");
@@ -168,7 +171,9 @@ QList<Controller*> HidEnumerator::queryDevices() {
                     continue;
                 }
 
-                qInfo() << "Found HID device:" << deviceInfo;
+                qInfo() << "Found HID device:" << deviceInfo
+                        << "VID" << Qt::hex << deviceInfo.getVendorId()
+                        << "PID" << deviceInfo.getProductId() << Qt::dec;
 
                 if (!deviceInfo.isValid()) {
                     qWarning() << "HID device permissions problem or device error."
@@ -176,11 +181,36 @@ QList<Controller*> HidEnumerator::queryDevices() {
                     continue;
                 }
 
+                const QString key = deviceInfo.androidConnectionKey();
+                if (seenKeys.contains(key)) {
+                    continue;
+                }
+                seenKeys.insert(key);
+                if (Controller* existing = m_devicesByKey.value(key, nullptr)) {
+                    found.append(existing);
+                    continue;
+                }
+
                 HidController* newDevice = new HidController(std::move(deviceInfo));
                 m_devices.push_back(newDevice);
+                m_devicesByKey.insert(key, newDevice);
+                found.append(newDevice);
             }
         }
     }
+    for (auto it = m_devicesByKey.begin(); it != m_devicesByKey.end();) {
+        if (seenKeys.contains(it.key())) {
+            ++it;
+            continue;
+        }
+        Controller* stale = it.value();
+        qInfo() << "HID device unplugged:" << stale->getName();
+        if (stale->isOpen()) {
+            stale->close();
+        }
+        it = m_devicesByKey.erase(it);
+    }
+    return found;
 #else
 
     QStringList enumeratedDevices;

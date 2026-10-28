@@ -83,6 +83,12 @@ class DeviceInfo final {
     void updateSerialNumber(QString serialNumber) {
         m_serialNumber = serialNumber;
     }
+    // Stable while the device stays plugged in. The kernel path changes across
+    // unplug/replug, which is what we want for hotplug identity.
+    QString androidConnectionKey() const {
+        return m_androidDeviceName + QLatin1Char('#') +
+                QString::number(m_usbInterfaceNumber);
+    }
 #endif
 
     const QString& getVendorString() const {
@@ -144,13 +150,13 @@ class DeviceInfo final {
     const std::vector<uint8_t>& fetchRawReportDescriptor(hid_device* pHidDevice);
 
     bool isValid() const {
-        return !getProductString().isNull()
 #ifdef Q_OS_ANDROID
-                && m_androidUsbDevice.isValid();
+        // Product and serial strings require USB permission and are null until
+        // the user grants it. The device is still a real HID interface.
+        return m_androidUsbDevice.isValid() && vendor_id != 0;
 #else
-                && !getSerialNumber().isNull();
+        return !getProductString().isNull() && !getSerialNumber().isNull();
 #endif
-        ;
     }
     QString formatName() const;
 
@@ -172,6 +178,7 @@ class DeviceInfo final {
     unsigned short usage;
 #else
     QJniObject m_androidUsbDevice;
+    QString m_androidDeviceName;
 #endif
 
     PhysicalTransportProtocol m_physicalTransportProtocol;

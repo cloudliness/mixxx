@@ -5,6 +5,7 @@
 
 #include "controllers/controller.h"
 #include "controllers/controllerlearningeventfilter.h"
+#include "controllers/controllermappinginfo.h"
 #include "controllers/controllermappinginfoenumerator.h"
 #include "controllers/defs_controllers.h"
 #include "controllers/legacycontrollermappingfilehandler.h"
@@ -100,7 +101,8 @@ ControllerManager::ControllerManager(UserSettingsPointer pConfig)
                   std::make_unique<ControllerLearningEventFilter>()),
           m_pollTimer(this),
           m_pThread(std::make_unique<QThread>()),
-          m_skipPoll(false) {
+          m_skipPoll(false),
+          m_hotplugRefreshPending(false) {
     qRegisterMetaType<std::shared_ptr<LegacyControllerMapping>>(
             "std::shared_ptr<LegacyControllerMapping>");
 
@@ -184,6 +186,10 @@ void ControllerManager::slotInitialize() {
 #endif
     } // Mutex locker released here
     emit initialized();
+    if (m_hotplugRefreshPending) {
+        m_hotplugRefreshPending = false;
+        slotHotplugRefresh();
+    }
 }
 
 void ControllerManager::slotShutdown() {
@@ -274,65 +280,135 @@ void ControllerManager::slotSetUpDevices() {
 
     updateControllerList();
     const QList<Controller*> deviceList = getControllerList(false, true);
-    QStringList mappingPaths(getMappingPaths(m_pConfig));
 
     for (Controller* pController : deviceList) {
-        QString name = pController->getName();
-
         if (pController->isOpen()) {
             pController->close();
         }
-
-        // The filename for this device name.
-        QString deviceName = sanitizeDeviceName(name);
-
-        // Check if device is enabled
-        if (!m_pConfig->getValue(ConfigKey("[Controller]", deviceName), 0)) {
-            continue;
-        }
-
-        // Check if device has a configured mapping
-        QString mappingFilePath = getConfiguredMappingFileForDevice(deviceName);
-        if (mappingFilePath.isEmpty()) {
-            continue;
-        }
-
-        qDebug() << "Searching for controller mapping" << mappingFilePath
-                 << "in paths:" << mappingPaths.join(",");
-        QFileInfo mappingFile = findMappingFile(mappingFilePath, mappingPaths);
-        if (!mappingFile.exists()) {
-            qDebug() << "Could not find" << mappingFilePath << "in any mapping path.";
-            continue;
-        }
-
-        std::shared_ptr<LegacyControllerMapping> pMapping =
-                LegacyControllerMappingFileHandler::loadMapping(
-                        mappingFile, resourceMappingsPath(m_pConfig));
-
-        if (!pMapping) {
-            continue;
-        }
-        pMapping->loadSettings(m_pConfig, pController->getName());
-
-        // This runs on the main thread but LegacyControllerMapping is not thread safe, so clone it.
-        pController->setMapping(std::move(pMapping));
-
-        // If we are in safe mode, skip opening controllers.
-        if (CmdlineArgs::Instance().getSafeMode()) {
-            qDebug() << "We are in safe mode -- skipping opening controller.";
-            continue;
-        }
-
-        qDebug() << "Opening controller:" << name;
-
-        int value = pController->open(m_pConfig->getResourcePath());
-        if (value != 0) {
-            qWarning() << "There was a problem opening" << name;
-            continue;
-        }
+        openSavedOrMatchingController(pController);
     }
 
     pollIfAnyControllersOpen();
+}
+
+void ControllerManager::slotHotplugRefresh() {
+    DEBUG_ASSERT_THIS_QOBJECT_THREAD_AFFINITY();
+    if (m_enumerators.empty()) {
+        m_hotplugRefreshPending = true;
+        return;
+    }
+    qInfo() << "Refreshing controllers after a USB hotplug event";
+    updateControllerList();
+    const QList<Controller*> deviceList = getControllerList(false, true);
+    for (Controller* pController : deviceList) {
+        if (pController->isOpen()) {
+            continue;
+        }
+        openSavedOrMatchingController(pController);
+    }
+    pollIfAnyControllersOpen();
+}
+
+bool ControllerManager::assignMatchingHidMapping(Controller* pController) {
+#ifdef __ANDROID__
+    if (CmdlineArgs::Instance().getSafeMode()) {
+        return false;
+    }
+    QDir mappingDir(resourceMappingsPath(m_pConfig));
+    QStringList names = mappingDir.entryList(
+            {QStringLiteral("*.hid.xml")}, QDir::Files, QDir::Name);
+    if (names.isEmpty()) {
+        // Android assets sometimes fail QDir listing. These three are the
+        // devices this port is expected to open without a prior preference.
+        names = QStringList{
+                QStringLiteral("Traktor Kontrol F1.hid.xml"),
+                QStringLiteral("Traktor Kontrol Z1.hid.xml"),
+                QStringLiteral("Traktor Kontrol X1 MK2.hid.xml"),
+        };
+    }
+    const QDir systemMappings(resourceMappingsPath(m_pConfig));
+    for (const QString& name : names) {
+        const QFileInfo file(mappingDir.filePath(name));
+        const MappingInfo info(file);
+        if (!info.isValid() || !pController->matchMapping(info)) {
+            continue;
+        }
+        std::shared_ptr<LegacyControllerMapping> pMapping =
+                LegacyControllerMappingFileHandler::loadMapping(file, systemMappings);
+        if (!pMapping) {
+            qWarning() << "Matched mapping failed to load:" << file.absoluteFilePath();
+            continue;
+        }
+        qInfo() << "Auto-selecting HID mapping" << info.getName()
+                << "for" << pController->getName();
+        pMapping->loadSettings(m_pConfig, pController->getName());
+        const ConfigKey presetKey(kSettingsGroup, sanitizeDeviceName(pController->getName()));
+        m_pConfig->set(presetKey, pMapping->filePath());
+        pController->setMapping(std::move(pMapping));
+        openController(pController);
+        return pController->isOpen();
+    }
+#else
+    Q_UNUSED(pController);
+#endif
+    return false;
+}
+
+void ControllerManager::openSavedOrMatchingController(Controller* pController) {
+    DEBUG_ASSERT_THIS_QOBJECT_THREAD_AFFINITY();
+    if (!pController) {
+        return;
+    }
+    const QString name = pController->getName();
+    const QString deviceName = sanitizeDeviceName(name);
+    const ConfigKey enabledKey(QStringLiteral("[Controller]"), deviceName);
+    const bool explicitlyConfigured = m_pConfig->exists(enabledKey);
+
+#ifdef __ANDROID__
+    // First sight of a device that matches a shipped HID mapping. A saved
+    // "disabled" value is left alone.
+    if (!explicitlyConfigured && assignMatchingHidMapping(pController)) {
+        return;
+    }
+#endif
+
+    if (!explicitlyConfigured || !m_pConfig->getValue(enabledKey, 0)) {
+        return;
+    }
+
+    QString mappingFilePath = getConfiguredMappingFileForDevice(deviceName);
+    if (mappingFilePath.isEmpty()) {
+        return;
+    }
+
+    const QStringList mappingPaths(getMappingPaths(m_pConfig));
+    qDebug() << "Searching for controller mapping" << mappingFilePath
+             << "in paths:" << mappingPaths.join(",");
+    const QFileInfo mappingFile = findMappingFile(mappingFilePath, mappingPaths);
+    if (!mappingFile.exists()) {
+        qDebug() << "Could not find" << mappingFilePath << "in any mapping path.";
+        return;
+    }
+
+    std::shared_ptr<LegacyControllerMapping> pMapping =
+            LegacyControllerMappingFileHandler::loadMapping(
+                    mappingFile, resourceMappingsPath(m_pConfig));
+    if (!pMapping) {
+        return;
+    }
+    pMapping->loadSettings(m_pConfig, pController->getName());
+    pController->setMapping(std::move(pMapping));
+
+    if (CmdlineArgs::Instance().getSafeMode()) {
+        qDebug() << "We are in safe mode -- skipping opening controller.";
+        return;
+    }
+
+    qDebug() << "Opening controller:" << name;
+    const int value = pController->open(m_pConfig->getResourcePath());
+    if (value != 0) {
+        qWarning() << "There was a problem opening" << name;
+    }
 }
 
 void ControllerManager::pollIfAnyControllersOpen() {

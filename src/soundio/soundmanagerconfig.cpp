@@ -23,6 +23,15 @@ const QString SoundManagerConfig::kAPIIosAudio = QStringLiteral("iOS Audio");
 const QString SoundManagerConfig::kAPICoreAudio = QStringLiteral("Core Audio");
 const QString SoundManagerConfig::kAPIPipewire = QStringLiteral("PipeWire");
 
+bool SoundManagerConfig::isOriginalTraktorKontrolZ1(const QString& displayName) {
+    const QString name = displayName.toLower();
+    if (name.contains(QStringLiteral("mk2")) || name.contains(QStringLiteral("mk 2"))) {
+        return false;
+    }
+    return name.contains(QStringLiteral("kontrol z1")) ||
+            name.contains(QStringLiteral("traktor z1"));
+}
+
 const QString SoundManagerConfig::kEmptyComboBox = QStringLiteral("---");
 const unsigned int SoundManagerConfig::kDefaultDeckCount = 2;
 
@@ -552,6 +561,37 @@ void SoundManagerConfig::loadDefaults(SoundManager* soundManager, unsigned int f
             m_api = SoundManagerConfig::kAPIIosAudio;
 #elif defined(Q_OS_MACOS)
             m_api = SoundManagerConfig::kAPICoreAudio;
+#elif defined(Q_OS_ANDROID)
+            QString chosenApi;
+            for (const QString& api : apiList) {
+                const QList<SoundDevicePointer> devices =
+                        soundManager->getDeviceList(api, true, false);
+                for (const auto& pDevice : devices) {
+                    if (isOriginalTraktorKontrolZ1(pDevice->getDisplayName()) &&
+                            pDevice->getNumOutputChannels() >= 4) {
+                        chosenApi = api;
+                        break;
+                    }
+                }
+                if (!chosenApi.isEmpty()) {
+                    break;
+                }
+            }
+            if (chosenApi.isEmpty()) {
+                for (const QString& api : apiList) {
+                    if (api.contains(QStringLiteral("oboe"), Qt::CaseInsensitive) ||
+                            api.contains(QStringLiteral("aaudio"), Qt::CaseInsensitive)) {
+                        chosenApi = api;
+                        break;
+                    }
+                }
+            }
+            if (chosenApi.isEmpty() && !apiList.isEmpty()) {
+                chosenApi = apiList.first();
+            }
+            if (!chosenApi.isEmpty()) {
+                m_api = chosenApi;
+            }
 #endif
         }
     }
@@ -563,17 +603,39 @@ void SoundManagerConfig::loadDefaults(SoundManager* soundManager, unsigned int f
         const QList<SoundDevicePointer> outputDevices =
                 soundManager->getDeviceList(m_api, true, false);
         if (!outputDevices.isEmpty()) {
+            SoundDevicePointer selected;
             for (const auto& pDevice : outputDevices) {
                 if (pDevice->getNumOutputChannels() < 2) {
                     continue;
                 }
+                const bool originalZ1 =
+                        isOriginalTraktorKontrolZ1(pDevice->getDisplayName()) &&
+                        pDevice->getNumOutputChannels() >= 4;
+                if (!selected || originalZ1) {
+                    selected = pDevice;
+                    if (originalZ1) {
+                        break;
+                    }
+                }
+            }
+            if (selected) {
                 AudioOutput mainOut(AudioPathType::Main,
                         0,
                         mixxx::audio::ChannelCount::stereo(),
                         0);
-                addOutput(pDevice->getDeviceId(), mainOut);
-                defaultSampleRate = pDevice->getDefaultSampleRate();
-                break;
+                addOutput(selected->getDeviceId(), mainOut);
+                defaultSampleRate = selected->getDefaultSampleRate();
+                if (isOriginalTraktorKontrolZ1(selected->getDisplayName()) &&
+                        selected->getNumOutputChannels() >= 4) {
+                    AudioOutput headphones(AudioPathType::Headphones,
+                            2,
+                            mixxx::audio::ChannelCount::stereo(),
+                            0);
+                    addOutput(selected->getDeviceId(), headphones);
+                    qInfo() << "Default audio route for the original Traktor Kontrol Z1:"
+                            << "main on channels 1-2, headphones on channels 3-4 of"
+                            << selected->getDisplayName();
+                }
             }
         }
     }

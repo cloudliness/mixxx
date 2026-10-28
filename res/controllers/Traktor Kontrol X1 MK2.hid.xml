@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<MixxxControllerPreset mixxxVersion="2.4.0" schemaVersion="1">
+    <info>
+        <name>Native Instruments Traktor Kontrol X1 MK2</name>
+        <author>infiniteloop</author>
+        <description>HID mapping for the Native Instruments Traktor Kontrol X1 Mk2 (USB 17cc:1220). Shift is the top-left Shift button. This is not compatible with the X1 Mk1 MIDI mapping.</description>
+        <forums>https://mixxx.discourse.group/t/solved-native-instruments-traktor-kontrol-x1-mk1/18471/11</forums>
+        <manual>native_instruments_traktor_kontrol_x1_mk2</manual>
+        <devices>
+            <product protocol="hid" vendor_id="0x17cc" product_id="0x1220" usage_page="0xff01" usage="0x0" interface_number="0x4" />
+        </devices>
+    </info>
+    <controller id="Traktor Kontrol X1 MK2">
+        <scriptfiles>
+            <file filename="common-hid-packet-parser.js" functionprefix="" />
+            <file filename="Traktor-Kontrol-X1-MK2-hid-scripts.js" functionprefix="TraktorX1MK2" />
+        </scriptfiles>
+    </controller>
+    <settings>
+        <option variable="logRawHidReports"
+            type="boolean"
+            label="Log raw HID reports"
+            default="false">
+            <description>
+                Write every input report to the Mixxx log as one line starting
+                with X1MK2_HID_REPORT, followed by the report length and the
+                bytes in hexadecimal. Turn this on while pressing each control
+                once, then search the log for X1MK2_HID_REPORT. On Android the
+                same lines are in logcat (tag qt or mixxx) and in Mixxx's log file.
+            </description>
+        </option>
+    </settings>
+</MixxxControllerPreset>

@@ -63,6 +63,10 @@ class SoundManagerConfig {
     static const QString kAPICoreAudio;
     static const QString kAPIPipewire;
 
+    /// True for the original Traktor Kontrol Z1 (USB 17cc:1210).
+    /// The Mk2 is a different product and is not matched.
+    static bool isOriginalTraktorKontrolZ1(const QString& displayName);
+
     /// The default sample rate that Mixxx uses.
     static constexpr mixxx::audio::SampleRate kMixxxDefaultSampleRate =
             mixxx::audio::SampleRate(44100);

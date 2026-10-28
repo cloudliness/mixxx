@@ -3,6 +3,9 @@
 #include <hidapi.h>
 
 #include <QDebugStateSaver>
+#ifdef Q_OS_ANDROID
+#include <QJniEnvironment>
+#endif
 
 #include "controllers/controllermappinginfo.h"
 #include "util/path.h"
@@ -58,20 +61,36 @@ DeviceInfo::DeviceInfo(const hid_device_info& device_info)
                   m_serialNumberRaw.data(), m_serialNumberRaw.size())) {
 }
 #else
+namespace {
+QString usbStringOrEmpty(const QJniObject& usbDevice, const char* method) {
+    QJniEnvironment env;
+    const QJniObject value = usbDevice.callMethod<jstring>(method);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return {};
+    }
+    if (!value.isValid()) {
+        return {};
+    }
+    return value.toString();
+}
+} // namespace
+
 DeviceInfo::DeviceInfo(
         const QJniObject& usbDevice, const QJniObject& usbInterface)
         : m_androidUsbDevice(usbDevice),
           m_physicalTransportProtocol(PhysicalTransportProtocol::USB) {
     vendor_id = static_cast<unsigned short>(usbDevice.callMethod<jint>("getVendorId"));
     product_id = static_cast<unsigned short>(usbDevice.callMethod<jint>("getProductId"));
-    m_manufacturerString = usbDevice.callMethod<jstring>("getManufacturerName").toString();
-    m_productString = usbDevice.callMethod<jstring>("getProductName").toString();
-    m_serialNumber = usbDevice.callMethod<jstring>("getSerialNumber").toString();
+    m_androidDeviceName = usbStringOrEmpty(usbDevice, "getDeviceName");
+    // Manufacturer, product and serial throw SecurityException until the user
+    // grants USB permission. Enumeration must still succeed so we can ask.
+    m_manufacturerString = usbStringOrEmpty(usbDevice, "getManufacturerName");
+    m_productString = usbStringOrEmpty(usbDevice, "getProductName");
+    m_serialNumber = usbStringOrEmpty(usbDevice, "getSerialNumber");
 
     if (m_serialNumber.isEmpty()) {
-        // Android won't allow reading serial number if permission wasn't
-        // granted previously. Is this an issue?
-        m_serialNumber = "N/A";
+        m_serialNumber = QStringLiteral("N/A");
     }
 
     m_usbInterfaceNumber = usbInterface.callMethod<jint>("getId");
@@ -107,14 +126,21 @@ QString DeviceInfo::formatName() const {
     // interface number to allow the user (and Mixxx!) to keep
     // track of which is which
     const auto serialSuffix = getSerialNumber().right(4);
+    QString product = getProductString();
+    if (product.isEmpty()) {
+        product = QStringLiteral("USB HID %1:%2")
+                          .arg(vendor_id, 4, 16, QLatin1Char('0'))
+                          .arg(product_id, 4, 16, QLatin1Char('0'))
+                          .toUpper();
+    }
     if (m_usbInterfaceNumber >= 0) {
-        return getProductString() +
+        return product +
                 QChar(' ') +
                 serialSuffix +
                 QChar('_') +
                 QString::number(m_usbInterfaceNumber);
     } else {
-        return getProductString() +
+        return product +
                 QChar(' ') +
                 serialSuffix;
     }
@@ -160,7 +186,7 @@ QDebug operator<<(QDebug dbg, const DeviceInfo& deviceInfo) {
 
 bool DeviceInfo::matchProductInfo(
         const ProductInfo& product) const {
-    bool ok;
+    bool ok = false;
     // Product and vendor match is always required
     if (vendor_id != product.vendor_id.toInt(&ok, 16) || !ok) {
         return false;
@@ -169,17 +195,22 @@ bool DeviceInfo::matchProductInfo(
         return false;
     }
 
-    // Optionally check against m_usbInterfaceNumber / usage_page && usage
-#ifndef Q_OS_ANDROID
-    if (m_usbInterfaceNumber >= 0)
-#endif
-    {
-        if (m_usbInterfaceNumber != product.interface_number.toInt(&ok, 16) || !ok) {
+    // Interface number is optional in the mapping. The original Kontrol Z1
+    // mapping declares only 17cc:1210. F1 (interface 1) and X1 Mk2 (interface 4)
+    // declare an interface so a composite device does not open the wrong one.
+    if (!product.interface_number.isEmpty()) {
+        const int mappedInterface = product.interface_number.toInt(&ok, 16);
+        if (!ok || m_usbInterfaceNumber != mappedInterface) {
             return false;
         }
+        return true;
     }
+
 #ifndef Q_OS_ANDROID
-    else {
+    // Usage page and usage are not available on Android until the device is
+    // open, so a VID/PID-only mapping matches there. On desktop, honor them
+    // when the mapping provides them.
+    if (!product.usage_page.isEmpty() || !product.usage.isEmpty()) {
         if (usage_page != product.usage_page.toInt(&ok, 16) || !ok) {
             return false;
         }
@@ -188,7 +219,6 @@ bool DeviceInfo::matchProductInfo(
         }
     }
 #endif
-    // Match found
     return true;
 }
 

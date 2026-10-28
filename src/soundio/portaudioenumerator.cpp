@@ -8,6 +8,7 @@
 #include "audio/types.h"
 #include "soundio/sounddevice.h"
 #include "soundio/sounddeviceportaudio.h"
+#include "soundio/soundmanagerconfig.h"
 #include "util/versionstore.h"
 
 #ifdef Q_OS_IOS
@@ -126,13 +127,24 @@ void PortAudioEnumerator::initialize() {
                 }
                 int32_t id = device->callMethod<jint>("getId");
                 auto channelCounts = device->callMethod<QJniArray<jint>>("getChannelCounts");
+                if (channelCounts.isEmpty()) {
+                    qWarning() << "audioManager - skipping device with no channel counts:"
+                               << name << "type" << type;
+                    continue;
+                }
                 int channelCount = *std::max_element(
                         channelCounts.begin(), channelCounts.end());
                 auto sampleRates = device->callMethod<QJniArray<jint>>("getSampleRates");
-                qDebug() << "audioManager - Type:" << type
-                         << "- Name:" << name
-                         << "- ChannelCount:" << channelCount
-                         << channelCounts.size();
+                qInfo() << "audioManager - Type:" << type
+                        << "- Name:" << name
+                        << "- ChannelCount:" << channelCount
+                        << "counts" << channelCounts.size();
+                if (SoundManagerConfig::isOriginalTraktorKontrolZ1(name) && channelCount < 4) {
+                    qWarning() << "Original Kontrol Z1 audio device" << name
+                               << "reports only" << channelCount
+                               << "channels. Main on 1-2 and headphones on 3-4"
+                               << "need 4 output channels from the Android USB audio HAL.";
+                }
                 if (!sampleRates.isEmpty()) {
                     int sampleRate = *sampleRates.cbegin();
                     qDebug() << "audioManager - SampleRates:" << sampleRate;
@@ -257,6 +269,7 @@ void PortAudioEnumerator::initialize() {
         }
     }
 
+    m_apis.clear();
     for (PaHostApiIndex i = 0; i < Pa_GetHostApiCount(); i++) {
         const PaHostApiInfo* api = Pa_GetHostApiInfo(i);
         if (api && std::strcmp(api->name, "skeleton implementation")) {
@@ -309,6 +322,7 @@ void PortAudioEnumerator::deinitialize() {
     }
 
     m_devices.clear();
+    m_apis.clear();
 
     PaError err = Pa_Terminate();
     if (err == paNoError) {

@@ -18,7 +18,7 @@ class LegacyControllerMapping;
 class ControllerEnumerator;
 
 /// Function to sort controllers by name
-bool controllerCompare(Controller *a, Controller *b);
+bool controllerCompare(Controller* a, Controller* b);
 
 /// Manages enumeration/operation/deletion of hardware controllers.
 class ControllerManager : public QObject {
@@ -30,7 +30,7 @@ class ControllerManager : public QObject {
     static const mixxx::Duration kPollInterval;
 
     QList<Controller*> getControllers() const;
-    QList<Controller*> getControllerList(bool outputDevices=true, bool inputDevices=true);
+    QList<Controller*> getControllerList(bool outputDevices = true, bool inputDevices = true);
     ControllerLearningEventFilter* getControllerLearningEventFilter() const;
     QSharedPointer<MappingInfoEnumerator> getMainThreadUserMappingEnumerator() const {
         return m_pMainThreadUserMappingEnumerator;
@@ -41,7 +41,9 @@ class ControllerManager : public QObject {
     QString getConfiguredMappingFileForDevice(const QString& name) const;
 
     /// Prevent other parts of Mixxx from having to manually connect to our slots
-    void setUpDevices() { emit requestSetUpDevices(); };
+    void setUpDevices() {
+        emit requestSetUpDevices();
+    };
 
     static QList<QString> getMappingPaths(UserSettingsPointer pConfig);
 
@@ -57,6 +59,9 @@ class ControllerManager : public QObject {
     void slotApplyMapping(Controller* pController,
             std::shared_ptr<LegacyControllerMapping> pMapping,
             bool bEnabled);
+    /// Re-enumerate USB HID devices and open newly attached controllers that
+    /// match a shipped mapping. Used by the Android USB attach/detach path.
+    void slotHotplugRefresh();
 
   private slots:
     /// Perform initialization that should be delayed until the ControllerManager
@@ -72,6 +77,8 @@ class ControllerManager : public QObject {
 
   private:
     void updateControllerList();
+    void openSavedOrMatchingController(Controller* pController);
+    bool assignMatchingHidMapping(Controller* pController);
     void startPolling();
     void stopPolling();
     void pollIfAnyControllersOpen();
@@ -100,4 +107,5 @@ class ControllerManager : public QObject {
     QSharedPointer<MappingInfoEnumerator> m_pMainThreadSystemMappingEnumerator;
     /// Accessed only from the ControllerManager thread via slotPollDevices().
     bool m_skipPoll;
+    bool m_hotplugRefreshPending;
 };

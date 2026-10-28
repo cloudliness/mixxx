@@ -526,6 +526,92 @@ void SoundManager::closeActiveConfig(bool async) {
     closeDevices(sleepAfterClosing, async);
 }
 
+void SoundManager::adoptOriginalKontrolZ1IfPresent() {
+#ifdef Q_OS_ANDROID
+    qInfo() << "Checking whether the original Kontrol Z1 can take main and headphones";
+    auto outputs = getDeviceList(m_config.getAPI(), true, false);
+    const auto z1Visible = [](const QList<SoundDevicePointer>& devices) {
+        for (const auto& pDevice : devices) {
+            if (SoundManagerConfig::isOriginalTraktorKontrolZ1(pDevice->getDisplayName()) &&
+                    pDevice->getNumOutputChannels() >= 4) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (!z1Visible(outputs)) {
+        qInfo() << "Original Kontrol Z1 is not in the current audio device list."
+                << "Rescanning after USB permission.";
+        closeDevices(false);
+        m_pEnumerator->deinitialize();
+        queryDevices();
+        if (!m_config.checkAPI()) {
+            m_config.loadDefaults(this, SoundManagerConfig::API);
+        }
+        outputs = getDeviceList(m_config.getAPI(), true, false);
+    }
+    SoundDevicePointer z1;
+    for (const auto& pDevice : outputs) {
+        if (SoundManagerConfig::isOriginalTraktorKontrolZ1(pDevice->getDisplayName()) &&
+                pDevice->getNumOutputChannels() >= 4) {
+            z1 = pDevice;
+            break;
+        }
+    }
+    if (!z1) {
+        qWarning() << "Original Kontrol Z1 was not enumerated with 4 output channels."
+                   << "Android may be exposing it as stereo only, or the USB audio"
+                   << "interface is not visible yet. Headphone channels 3-4 were not routed.";
+        if (!m_config.validateDevices()) {
+            m_config.loadDefaults(this,
+                    SoundManagerConfig::API | SoundManagerConfig::DEVICES);
+        }
+        setupDevices();
+        return;
+    }
+
+    bool headphonesOnZ1 = false;
+    const auto configured = m_config.getOutputs();
+    for (auto it = configured.cbegin(); it != configured.cend(); ++it) {
+        if (it.key() == z1->getDeviceId() &&
+                it.value().getType() == AudioPathType::Headphones &&
+                it.value().getChannelGroup().getChannelBase() == 2) {
+            headphonesOnZ1 = true;
+        }
+    }
+    if (headphonesOnZ1) {
+        qInfo() << "Original Kontrol Z1 already routes headphones to channels 3-4";
+        return;
+    }
+
+    qInfo() << "Routing original Kontrol Z1" << z1->getDisplayName()
+            << "main to channels 1-2 and headphones to channels 3-4 ("
+            << z1->getNumOutputChannels() << "output channels reported)";
+    m_config.clearOutputs();
+    m_config.addOutput(z1->getDeviceId(),
+            AudioOutput(AudioPathType::Main,
+                    0,
+                    mixxx::audio::ChannelCount::stereo(),
+                    0));
+    m_config.addOutput(z1->getDeviceId(),
+            AudioOutput(AudioPathType::Headphones,
+                    2,
+                    mixxx::audio::ChannelCount::stereo(),
+                    0));
+    if (z1->getDefaultSampleRate().isValid()) {
+        m_config.setSampleRate(z1->getDefaultSampleRate());
+    }
+    const SoundDeviceStatus status = setupDevices();
+    if (status == SoundDeviceStatus::Ok) {
+        m_config.writeToDisk();
+    } else {
+        qWarning() << "Failed to open Kontrol Z1 audio:" << getLastErrorMessage(status);
+    }
+#else
+    qInfo() << "adoptOriginalKontrolZ1IfPresent is Android-only";
+#endif
+}
+
 SoundDeviceStatus SoundManager::setConfig(const SoundManagerConfig& config) {
     SoundDeviceStatus status = SoundDeviceStatus::Ok;
     m_config = config;
